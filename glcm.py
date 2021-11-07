@@ -9,7 +9,7 @@ from skimage.feature.texture import greycomatrix, greycoprops
 from scipy import ndimage
 
 
-def fast_glcm(img, distances=[1], angles=[0], levels=8, kernel_size=5):
+def fast_glcm(img, distances=[1], angles=[0], levels=8, kernel_size=5, normed=False):
     # https://github.com/tzm030329/GLCM/blob/master/fast_glcm.py
     assert img.dtype == np.uint8
     # assert kernel_size is not even
@@ -41,13 +41,14 @@ def fast_glcm(img, distances=[1], angles=[0], levels=8, kernel_size=5):
             kernel[d_i, a_i] = ndimage.shift(kernel[d_i,a_i],(offset_row, -offset_col), mode='constant', cval=0)
 
     # Make masks to mark every instance where i==j.
-    glcm = np.zeros((levels, levels, n_distances, n_angles, h, w), dtype=np.uint32)
+    glcm = np.zeros((levels, levels, n_distances, n_angles, h, w), dtype=np.uint8)
     for i in range(levels):
         for j in range(levels):
             mask = ((img==i) & (img_offset_matrix==j))
             glcm[i,j, mask] = 1
             
     # Moving window sums of the glcm
+    # TODO: bottleneck is here when levels = 255
     for i in range(levels):
         for j in range(levels):
             for d_i, d in enumerate(distances):
@@ -55,9 +56,11 @@ def fast_glcm(img, distances=[1], angles=[0], levels=8, kernel_size=5):
                     # correlate is the moving window sum, based on kernel weights
                     glcm[i,j, d_i, a_i] = ndimage.correlate(glcm[i,j, d_i, a_i], kernel[d_i,a_i], mode='nearest')
 
-    #TODO: if normed, do normaliziation.
-    #glcm = glcm.astype(np.float32) / glcm.sum((0,1))
-    #glcm = glcm.astype(np.float32)
+    if normed:
+        glcm = glcm.astype(np.float32)
+        glcm_sums = np.sum(glcm, axis=(0, 1), keepdims=True)
+        glcm_sums[glcm_sums == 0] = 1
+        glcm /= glcm_sums
         
     # return minus the padding from the window values. While the ndiimage.correlate step
     # above calculated edge P_ij values, the canonical way to do glcms is to not calculate
@@ -67,19 +70,57 @@ def fast_glcm(img, distances=[1], angles=[0], levels=8, kernel_size=5):
     
     return glcm[:,:,:,:,edge_padding:-edge_padding,edge_padding:-edge_padding]
 
-def fast_glcm_contrast(img, nbit=8, kernel_size=3):
+def fast_glcm_contrast(glcm):
     '''
     calc glcm contrast
     '''
-    h,w = img.shape
-    glcm = fast_glcm(img=img, nbit=nbit, kernel_size=kernel_size)
-    cont = np.zeros((h,w), dtype=np.float32)
-    for i in range(nbit):
-        for j in range(nbit):
+    n_i, n_j, n_distances, n_angles, h, w = glcm.shape
+    cont = np.zeros((n_distances, n_angles, h, w), dtype=np.float32)
+    for i in range(n_i):
+        for j in range(n_j):
             cont += glcm[i,j] * (i-j)**2
 
     return cont
 
+
+def fast_glcm_stats(img, stats, distances=[1], angles=[0], levels=8, kernel_size=3):
+    valid_stats = ['contrast','dissimilarity','homogeneity']
+    assert all([s in valid_stats for s in stats]), 'invalid stats'
+    
+    glcm = fast_glcm(img, 
+                     distances=distances, 
+                     angles=angles, 
+                     levels=levels, 
+                     kernel_size=kernel_size,
+                     normed=True)
+    
+    # glcm shape is (levels, levels, distances, angles, height, width)
+    # where height/width are truncated from the smoothing window    
+    glcm_h, glcm_w = glcm.shape[4:6]
+    
+    stat_array = np.zeros((len(stats), len(distances), len(angles), glcm_h, glcm_w))
+    
+    for i in range(levels):
+        for j in range(levels):
+            for stat_i, stat_name in enumerate(stats):
+                
+                if stat_name == 'contrast':
+                    stat_array[stat_i] += glcm[i,j] * ((i-j)**2)
+                if stat_name == 'dissimilarity':
+                    stat_array[stat_i] += glcm[i,j] * np.abs(i-j)
+                if stat_name == 'homogeneity':
+                    stat_array[stat_i] += glcm[i,j] / (1.+(i-j)**2)
+                
+    # pad the edges back to the original img shape
+    trimmed_pixels = int(kernel_size/2)
+    edge_pad = (trimmed_pixels,trimmed_pixels)
+    no_pad   = (0,0)
+    #                                 stat    dist     ang     height    width  
+    stat_array = np.pad(stat_array, [no_pad, no_pad, no_pad, edge_pad, edge_pad], mode='edge')
+
+    # put stat axis at the end, this makes it easier to get the overal average, across
+    # distances and angles, for each stat 
+    return np.moveaxis(stat_array, 0, -1)
 
 def glcm_skimage(img, distances=[1], angles=[0], levels=8, kernel_size=3, normed=False):
     """ 
@@ -106,7 +147,7 @@ def glcm_skimage_stats(img, stats, distances=[1], angles=[0], levels=8, kernel_s
     
     n_stats = len(stats)
     
-    glcm = glcm_skimage(img, distances=distances, angles=angles, levels=levels, kernel_size=kernel_size)
+    glcm = glcm_skimage(img, distances=distances, angles=angles, levels=levels, kernel_size=kernel_size, normed=True)
 
     # glcm shape is (levels, levels, distances, angles, height, width)
     # where height/width are truncated from the smoothing window    
@@ -124,7 +165,7 @@ def glcm_skimage_stats(img, stats, distances=[1], angles=[0], levels=8, kernel_s
     trimmed_pixels = int(kernel_size/2)
     edge_pad = (trimmed_pixels,trimmed_pixels)
     no_pad   = (0,0)
-    #                   dist     ang     height    width     stat  
+    #                                dist     ang     height    width     stat  
     stat_array = np.pad(stat_array, [no_pad, no_pad, edge_pad, edge_pad, no_pad], mode='edge')
 
     return stat_array
@@ -144,18 +185,30 @@ image = np.array([[0, 0, 0, 0, 0, 0, 0],
                   [0, 0, 2, 2, 2, 0, 0],
                   [0, 0, 0, 0, 0, 0, 0]], dtype=np.uint8)
 
+image = skimage.data.camera()
 
-glcm1 = glcm_skimage(image, [1], [0,np.pi/2,np.pi, np.pi*1.5], levels=8, kernel_size=3)
-glcm2 = fast_glcm(image, [1], [0,np.pi/2, np.pi, np.pi*1.5],levels=8, kernel_size=3)
+glcm1 = glcm_skimage_stats(image,['contrast','dissimilarity','homogeneity'], [1], [0,np.pi/2,np.pi,np.pi*1.5], levels=256, kernel_size=5).round(3)
+glcm1 = glcm1.mean((0,1))
+
+
+bins = np.linspace(0, 256, 9)
+image = np.digitize(image, bins)-1
+glcm2 = fast_glcm_stats(image.astype(np.uint8), ['contrast','dissimilarity','homogeneity'], [1],  [0,np.pi/2,np.pi,np.pi*1.5],levels=8, kernel_size=10).round(3)
+
+
+glcm2 = glcm2.mean((0,1))
+
+plt.imshow(glcm2[:,:,2])
 
 (glcm1 == glcm2).all()
 from timeit import timeit
 
 image = np.random.randint(0,8, size=800*500).reshape((800,500)).astype(np.uint8)
 
-timeit(lambda: glcm_skimage(image, [1], [0], levels=8, kernel_size=3), number=3)
-timeit(lambda: fast_glcm(image, [1], [0], levels=8, kernel_size=3), number=3)
+#timeit(lambda: glcm_skimage(image, [1], [0], levels=8, kernel_size=3), number=3)
+#timeit(lambda: fast_glcm(image, [1], [0], levels=8, kernel_size=3), number=3)
 
 
+glcm2 = fast_glcm(image.astype(np.uint8), [1],  [0,np.pi/2,np.pi,np.pi*1.5],levels=8, kernel_size=10).round(3)
 
 

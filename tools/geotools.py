@@ -1,46 +1,102 @@
+import rasterio
+from rasterio import windows
+from skimage.transform import resize
+
 import numpy as np
+import geopandas as gpd
 
+from shapely.geometry import box, Polygon
 
-def resample_planet_imagery(original_img, dest_res, src_res=3):
+from math import cos, radians
+import datetime
+import json
+from os import path, mkdir
+
+import pyproj
+from shapely.ops import transform as shapely_transform
+
+def transform_4326_shape_to_raster_crs(polygon, raster_path):
+    """ 
+    Given any shapely shape in the lat/lon crs 4326, transfrom to the
+    crs of the raster at raster_path.
     """
-    Upscale the ~3m planet imagery to a coarser resolution.
+    wgs84 = pyproj.CRS('EPSG:4326')
+    with rasterio.open(raster_path) as src:
+        raster_crs = src.crs
+    project = pyproj.Transformer.from_crs(wgs84, raster_crs, always_xy=True).transform
+    return shapely_transform(project, polygon)
+
+def transform_shape_crs(shape, src_crs, dst_crs):
+    """Transform a shapely shape to an arbitrary crs"""
+    project = pyproj.Transformer.from_crs(src_crs, dst_crs, always_xy=True).transform
+    return shapely_transform(project, shape)
+
+def get_raster_crop_from_box(raster_filepath, 
+                             box,
+                             bands='rgb'):
+    """
+    Get a cropped raster as a numpy array, and a rasterio.profile with
+    the adjusted transform information.
     
-    Uses fixed windows, not sliding windows, via the view_as_blocks method
-    in skimage
-    The number of pixels is *retained*
+    It's assumed that box is already in the crs coordinates of the raster.
 
     Parameters
     ----------
-    original_img : TYPE
-        DESCRIPTION.
-    res : TYPE
-        DESCRIPTION.
-
+    raster_filepath : str
+        Path to raster file. The full raster will not be loaded into memory.
+    box : shapely.geometry.Polygon
+        The box to crop with. Can actually be any polygon, but only the 
+        min/max bounds will be used.
+    bands : str, optional
+        Either 'rgb' or 'single' for true color or single band tifs, respectively. 
+        The default is 'rgb'.
+        
     Returns
     -------
-    None.
+    cropped_profile : dict
+        rasterio style profile
+    cropped_raster_data : array
+        numpy array of raster data with shape (bands, height, width)
 
     """
-    assert isinstance(original_img, np.ndarray), 'original_img must be np array'
-    assert len(original_img.shape) == 2, 'original_img must be 2D array'
-    window_size = np.floor(dest_res/src_res).astype(int)
+    if bands == 'rgb':
+        bands = [1,2,3]
+    elif bands == 'single':
+        bands = [1]
+    # also accept a multi-band list like [1,2,3,4,5,6]
+    elif isinstance(bands, list) and all(isinstance(b, int) for b in bands):
+        pass
+    else:
+        raise ValueError('bands should be "rgb","single" or list of band numbers')
+        
+    with rasterio.open(raster_filepath) as src:
+            src_raster_profile = src.profile
+                        
+            # The rasterio window defines the rows,cols of the cropping box
+            minx, miny, maxx, maxy = box.bounds
+            win = windows.from_bounds(left   = minx, 
+                                      bottom = miny, 
+                                      right  = maxx,
+                                      top    = maxy,
+                                      transform = src_raster_profile['transform'])
+            
+            # This has the shape (bands, height, width) even with just 1 band
+            cropped_raster_data = src.read(bands, window=win)
+            window_transform =  windows.transform(win, src_raster_profile['transform'])
+            
+            cropped_profile = src_raster_profile.copy()
+            cropped_profile.update({'height'    : cropped_raster_data.shape[1],
+                                    'width'     : cropped_raster_data.shape[2],
+                                    'count'     : len(bands),
+                                    'transform' : window_transform})
     
-    # crop the img to fit the new resolution exactly.
-    # a few meters lost around the edges is not big deal
-    n_windows_y = np.floor(original_img.shape[0] / window_size).astype(int)
-    n_windows_x = np.floor(original_img.shape[1] / window_size).astype(int)
+    # These settings don't translate well from large to small images, causing errors
+    # without them gdal will just set a default value.
+    for attr_to_drop in ['blockysize','blockxsize']:
+        if attr_to_drop in cropped_profile:
+            _ = cropped_profile.pop(attr_to_drop)
     
-    original_img = original_img[:n_windows_y * window_size, :n_windows_x*window_size]
-    
-    windows = view_as_blocks(original_img, block_shape=(window_size,window_size))
-    
-    windows2 = np.zeros_like(windows, dtype=windows.dtype)
-    # TODO: explain this part. This makes the tiled window mean while 
-    # retaining the original resolution. In other words, a 3m resolution image
-    # upscaled to 30m keeps the same number of pixels, but everything in 
-    # 30m chunks has the same mean value.
-    windows2.T[:] = windows.mean(axis=(2,3)).T
-    
-    output_size = (n_windows_y * window_size, n_windows_x * window_size)
-    # See here on reversing view_as_blocks() https://stackoverflow.com/a/59938823
-    return windows2.transpose(0,2,1,3).reshape(output_size)
+    return cropped_profile, cropped_raster_data
+
+
+

@@ -29,10 +29,14 @@ def place_order(request, auth):
     order_url = _ORDERS_URL + '/' + order_id
     return order_url
 
-def poll_for_success(order_url, auth, num_loops=50):
-    count = 0
-    while(count < num_loops):
-        count += 1
+def wait_on_order(order_url, auth, timeout=600, check=10):
+    """ 
+    block until the planet order completes (failure or success), or
+    until the timeout (seconds)
+    """
+    
+    start_time = time.time()
+    while (time.time() - start_time) < timeout:
         r = requests.get(order_url, auth=auth)
         response = r.json()
         state = response['state']
@@ -43,9 +47,9 @@ def poll_for_success(order_url, auth, num_loops=50):
         elif state in success_states:
             break
         
-        time.sleep(10)
+        time.sleep(check)
         
-def download_order(order_url, auth, overwrite=False):
+def download_order(order_url, auth, dest_dir, overwrite=False):
     r = requests.get(order_url, auth=auth)
     print(r)
 
@@ -53,7 +57,7 @@ def download_order(order_url, auth, overwrite=False):
     results = response['_links']['results']
     results_urls = [r['location'] for r in results]
     results_names = [r['name'] for r in results]
-    results_paths = [pathlib.Path(os.path.join('data', n)) for n in results_names]
+    results_paths = [pathlib.Path(os.path.join(dest_dir, n)) for n in results_names]
     print('{} items to download'.format(len(results_urls)))
     
     for url, name, path in zip(results_urls, results_names, results_paths):
@@ -72,7 +76,7 @@ def item_list_to_footprints(items):
     From a list of search query items, create a GeoDataFrame of the item
     outlines along with various attributes.
     """
-    attribute_names = ['acquired','clear_percent']
+    attribute_names = ['satellite_id','acquired','clear_percent','cloud_percent']
     
     attributes = []
     geoms = []
@@ -80,5 +84,8 @@ def item_list_to_footprints(items):
         attributes.append({a:i['properties'][a] for a in attribute_names})
         geoms.append(shape(i['geometry']))
     
-    return gpd.GeoDataFrame(attributes, geometry=gpd.GeoSeries(geoms)).set_crs(4326)
-
+    geodf = gpd.GeoDataFrame(attributes, geometry=gpd.GeoSeries(geoms)).set_crs(4326)
+    geodf['date'] = gpd.pd.DatetimeIndex(geodf.acquired).strftime('%Y-%m-%d')
+    geodf['time'] = gpd.pd.DatetimeIndex(geodf.acquired).strftime('%H%M')
+    
+    return geodf

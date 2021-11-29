@@ -59,11 +59,14 @@ focal_dates = [
     datetime.datetime(year=2020,month=9,day=20)
     ]
 
-planet_search_window = 4 # +- this many days
-l8_search_window = 8
+planet_search_window = 6 # +- this many days
+l8_search_window = 9
 s2_search_window = 8
 
-focal_date =  focal_dates[1]
+max_planet_scenes_per_roi = 30
+
+#---------------------------
+
 
 def get_search_window(focal_date, window_size, api='planet'):
     date_range_start = focal_date - datetime.timedelta(days=window_size)
@@ -77,7 +80,7 @@ def get_search_window(focal_date, window_size, api='planet'):
     else:
         raise ValueError(f'unknown api type: {api}')
 
-#---------------------------
+
 
 
 def find_adquate_scene(stack_items, roi, max_cloud_coverage=10, min_roi_coverage=0.95):
@@ -131,17 +134,20 @@ item_search_results = []
 search_result_shapes = {
     'geometry' : [],
     'type'     : [],
-    'id'       : []
+    'id'       : [],
+    'time_period' : []
     }
 
-for feature in all_rois['features']:
-    roi = feature['geometry']
-    roi_id = feature['properties']['roi_id']
+n_rois = len(all_rois['features'])
+
+for roi_i, roi_feature in enumerate(all_rois['features']):
+    roi = roi_feature['geometry']
+    roi_id = roi_feature['properties']['roi_id']
     roi_shape = shape(roi)
     
     ltar_domain = roi_id.split('-')[0]
     
-    print(f'processing {roi_id}')
+    print(f'processing roi {roi_i}/{n_rois} {roi_id}')
     # jornada_roi = {
     #         "type": "Polygon",
     #         "coordinates": [
@@ -152,119 +158,136 @@ for feature in all_rois['features']:
     #            [-106.875,   32.514973]]
     #         ]}
     
-    planet_search_date_start, planet_search_date_end = get_search_window(
-        focal_date = focal_date,
-        window_size = planet_search_window,
-        api = 'planet'
+    for focal_date in focal_dates:
+    
+        planet_search_date_start, planet_search_date_end = get_search_window(
+            focal_date = focal_date,
+            window_size = planet_search_window,
+            api = 'planet'
+            )
+        
+        query = filters.and_filter(
+            filters.geom_filter(roi),
+            filters.range_filter('clear_percent', gte=90),
+            filters.date_range('acquired', gte=planet_search_date_start),
+            filters.date_range('acquired', lte=planet_search_date_end)
         )
-    
-    query = filters.and_filter(
-        filters.geom_filter(roi),
-        filters.range_filter('clear_percent', gte=90),
-        filters.date_range('acquired', gte=planet_search_date_start),
-        filters.date_range('acquired', lte=planet_search_date_end)
-    )
-    
-    request = filters.build_search_request(query, ['PSScene4Band'])
-    
-    # search the data api
-    result = planet_client.quick_search(request)
-    items = list(result.items_iter(limit=5000))
-    
-    # Limit to 1 instrument type. This can potentially be ajusted if clouds
-    # end up being too much
-    items = [i for i in items if i['properties']['instrument'] == 'PS2.SD']
-    
-    # Sort by cloudiness
-    items = sorted(items, key = lambda i: -i['properties']['clear_percent'])
-    
-    for planet_scene in items:
-        # Given a potential planet scene to use, see if there is a corresponding
-        # L8 and S2 image within the desired date range. 
-        planet_scene_roi = planet_scene['geometry']
-        planet_scene_roi_shape = shape(planet_scene_roi)
-        # TODO: check urban/water coverage
-        search_result_shapes['geometry'].append(planet_scene_roi_shape)
-        search_result_shapes['type'].append('planet')
-        search_result_shapes['id'].append(planet_scene['id'])
         
+        request = filters.build_search_request(query, ['PSScene4Band'])
         
+        # search the data api
+        result = planet_client.quick_search(request)
+        items = list(result.items_iter(limit=5000))
         
+        # Limit to 1 instrument type. This can potentially be ajusted if clouds
+        # end up being too much
+        items = [i for i in items if i['properties']['instrument'] == 'PS2.SD']
         
-        # STAC date search str looks like '2019-01-01/2019-01-31'
-        l8_date_str =  get_search_window(
-                focal_date = focal_date,
-                window_size = l8_search_window,
-                api = 'stac'
-            )
+        # Sort by cloudiness
+        items = sorted(items, key = lambda i: -i['properties']['clear_percent'])
         
-        # landsat 8 search
-        l8_scenes = ms_catalog.search(collections = [ms_l8_id],
-                                      intersects  = planet_scene_roi,
-                                      datetime    = l8_date_str)
-        l8_scenes = [i for i in l8_scenes.get_items()]
-        l8_scene = find_adquate_scene(l8_scenes, roi=planet_scene_roi)
-       
-        l8_scene_info = dict(
-            l8_scene_found = False,
-            l8_scene_id = None,
-            l8_scene_clouds = None,
-            l8_scene_roi_coverage = None
-            )
-        if l8_scene:
-            l8_scene_info['l8_scene_found'] = True
-            l8_scene_info['l8_scene_id'] = l8_scene.id
-            l8_scene_info['l8_scene_clouds'] = round(l8_scene.properties['eo:cloud_cover'],2)
-            l8_scene_info['l8_scene_roi_coverage'] = round(planet_scene_roi_shape.intersection(shape(l8_scene.geometry)).area / planet_scene_roi_shape.area,2)
+        # how many candidate scenes have been evaled for this ROI?
+        roi_planet_scene_count = 0
+        
+        for planet_scene in items:
+            roi_planet_scene_count += 1
+            if roi_planet_scene_count > max_planet_scenes_per_roi:
+                break   
+            
+            # Given a potential planet scene to use, see if there is a corresponding
+            # L8 and S2 image within the desired date range. 
+            planet_scene_roi = planet_scene['geometry']
+            planet_scene_roi_shape = shape(planet_scene_roi)
+            # TODO: check urban/water coverage
+            search_result_shapes['geometry'].append(planet_scene_roi_shape)
+            search_result_shapes['type'].append('planet')
+            search_result_shapes['id'].append(planet_scene['id'])
+            search_result_shapes['time_period'].append(focal_date)
+            
+            
+            # STAC date search str looks like '2019-01-01/2019-01-31'
+            l8_date_str =  get_search_window(
+                    focal_date = focal_date,
+                    window_size = l8_search_window,
+                    api = 'stac'
+                )
+            
+            # landsat 8 search
+            l8_scenes = ms_catalog.search(collections = [ms_l8_id],
+                                          intersects  = planet_scene_roi,
+                                          datetime    = l8_date_str)
+            l8_scenes = [i for i in l8_scenes.get_items()]
+            l8_scene = find_adquate_scene(l8_scenes, roi=planet_scene_roi)
+           
+            l8_scene_info = dict(
+                l8_scene_found = False,
+                l8_scene_id = None,
+                l8_scene_clouds = None,
+                l8_scene_roi_coverage = None
+                )
+            if l8_scene:
+                l8_scene_info['l8_scene_found'] = True
+                l8_scene_info['l8_scene_id'] = l8_scene.id
+                l8_scene_info['l8_scene_clouds'] = round(l8_scene.properties['eo:cloud_cover'],2)
+                l8_scene_info['l8_scene_roi_coverage'] = round(planet_scene_roi_shape.intersection(shape(l8_scene.geometry)).area / planet_scene_roi_shape.area,2)
+    
+    
+                if l8_scene.id not in search_result_shapes['id']:
+                    search_result_shapes['geometry'].append(shape(l8_scene.geometry))
+                    search_result_shapes['type'].append('l8')
+                    search_result_shapes['id'].append(l8_scene.id)
+                    search_result_shapes['time_period'].append(focal_date)
+             
+           
+            # sentinal 2 search
+            s2_date_str =  get_search_window(
+                    focal_date = focal_date,
+                    window_size = s2_search_window,
+                    api = 'stac'
+                )
+            s2_scenes = ms_catalog.search(collections = [ms_s2_id],
+                                          intersects  = planet_scene_roi,
+                                          datetime    = s2_date_str)
+            s2_scenes = [i for i in s2_scenes.get_items()]
+            
+            s2_scene = find_adquate_scene(s2_scenes, roi=planet_scene_roi)
+            
+            s2_scene_info = dict(
+                s2_scene_found = False,
+                s2_scene_id = None,
+                s2_scene_clouds = None,
+                s2_scene_roi_coverage = None
+                )
+            if s2_scene:
+                s2_scene_info['s2_scene_found'] = True
+                s2_scene_info['s2_scene_id'] = s2_scene.id
+                s2_scene_info['s2_scene_clouds'] = round(s2_scene.properties['eo:cloud_cover'],2)
+                s2_scene_info['s2_scene_roi_coverage'] = round(planet_scene_roi_shape.intersection(shape(s2_scene.geometry)).area / planet_scene_roi_shape.area,2)
+    
+                if s2_scene.id not in search_result_shapes['id']:
+                    search_result_shapes['geometry'].append(shape(s2_scene.geometry))
+                    search_result_shapes['type'].append('s2')
+                    search_result_shapes['id'].append(s2_scene.id)
+                    search_result_shapes['time_period'].append(focal_date)
+            
+            planet_scene_search_result = dict(
+                ltar_domain = ltar_domain,
+                ltar_roi_id = roi_id,
+                time_period = str(focal_date.date()),
+                planet_scene_id = planet_scene['id'],
+                scene_clear_percent = planet_scene['properties']['clear_percent'],
+                **l8_scene_info,
+                **s2_scene_info
+                )
+            
+            item_search_results.append(planet_scene_search_result)
+        
+pd.DataFrame(item_search_results).to_csv('./roi_search_results.csv',index=False)
 
+search_result_shapes = pd.DataFrame(search_result_shapes)
 
-            search_result_shapes['geometry'].append(shape(l8_scene.geometry))
-            search_result_shapes['type'].append('l8')
-            search_result_shapes['id'].append(l8_scene.id)
-         
-       
-        # sentinal 2 search
-        s2_date_str =  get_search_window(
-                focal_date = focal_date,
-                window_size = s2_search_window,
-                api = 'stac'
-            )
-        s2_scenes = ms_catalog.search(collections = [ms_s2_id],
-                                      intersects  = planet_scene_roi,
-                                      datetime    = s2_date_str)
-        s2_scenes = [i for i in s2_scenes.get_items()]
-        
-        s2_scene = find_adquate_scene(s2_scenes, roi=planet_scene_roi)
-        
-        s2_scene_info = dict(
-            s2_scene_found = False,
-            s2_scene_id = None,
-            s2_scene_clouds = None,
-            s2_scene_roi_coverage = None
-            )
-        if s2_scene:
-            s2_scene_info['s2_scene_found'] = True
-            s2_scene_info['s2_scene_id'] = s2_scene.id
-            s2_scene_info['s2_scene_clouds'] = round(s2_scene.properties['eo:cloud_cover'],2)
-            s2_scene_info['s2_scene_roi_coverage'] = round(planet_scene_roi_shape.intersection(shape(s2_scene.geometry)).area / planet_scene_roi_shape.area,2)
-
-            search_result_shapes['geometry'].append(shape(s2_scene.geometry))
-            search_result_shapes['type'].append('s2')
-            search_result_shapes['id'].append(s2_scene.id)
-        
-        planet_scene_search_result = dict(
-            ltar_domain = ltar_domain,
-            ltar_roi_id = roi_id,
-            time_period = str(focal_date.date()),
-            planet_scene_id = planet_scene['id'],
-            scene_clear_percent = planet_scene['properties']['clear_percent'],
-            **l8_scene_info,
-            **s2_scene_info
-            )
-        
-        item_search_results.append(planet_scene_search_result)
-        
-pd.DataFrame(item_search_results).to_csv('./roi_search_test.csv',index=False)
-
-gpd.GeoDataFrame(pd.DataFrame(search_result_shapes)).set_crs(4326).to_file('./roi_search_shapes.geojson', driver='GeoJSON')
+for t in focal_dates:
+    temp_df = search_result_shapes[search_result_shapes.time_period == t]
+    shapefile_name = './data/roi_search_shapes_{}.geojson'.format(t.date())
+    gpd.GeoDataFrame(temp_df).set_crs(4326).to_file(shapefile_name, driver='GeoJSON')
 

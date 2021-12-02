@@ -25,14 +25,7 @@ Then find matching Landsat 8 and Sentinal 2 scenes with minimal clouds on the MS
 Create a csv of results and geojson of resulting image bounds.
 """
 
-api_key = ''
-PLANET_API_KEY = os.environ.get('PL_API_KEY', api_key)
-
-planet_client = api.ClientV1(api_key=PLANET_API_KEY)
-
-
-# set up requests to work with api
-planet_auth = HTTPBasicAuth(PLANET_API_KEY, '')
+from planet_api_setup import planet_client, planet_auth
 
 #------------------------
 # MS planetary computer STAC clients

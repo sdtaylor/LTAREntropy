@@ -4,9 +4,12 @@ import os
 from os import path
 import time
 
+import glob
+
 import pandas as pd
 import numpy as np
 import rasterio
+import rasterio.warp
 from rasterio.plot import show
 from shapely.geometry import shape 
 import requests
@@ -29,14 +32,11 @@ import geopandas as gpd
 
 image_folder = './data/imagery/'
 
+planet_scene_type = 'PSScene4Band'
+
 #------------------------
 # Planet API
-api_key = ''
-PLANET_API_KEY = os.environ.get('PL_API_KEY', api_key)
-
-planet_client = api.ClientV1(api_key=PLANET_API_KEY)
-# set up requests to work with api
-planet_auth = HTTPBasicAuth(PLANET_API_KEY, '')
+from planet_api_setup import planet_client, planet_auth
 
 #------------------------
 # MS planetary computer STAC clients
@@ -53,35 +53,29 @@ ms_s2_catalog = ms_catalog.get_child('sentinel-2-l2a')
 #------------------------
 
 
-all_scene_combos = [
-    dict(
-        ltar_domain = 'umrb',
-        planet_scene_id = '20200718_164445_64_106c',
-        planet_scene_type = 'PSScene4Band',
-        l8_scene_id     = 'LC08_L2SP_028029_20200724_02_T1',
-        s2_scene_id     = 'S2B_MSIL2A_20200728T170849_R112_T14TQQ_20200817T225422'
-        ),
-    dict(
-        ltar_domain = 'jer',
-        planet_scene_id = '20200718_174728_35_1058',
-        planet_scene_type = 'PSScene4Band',
-        l8_scene_id     = 'LC08_L2SP_032038_20200720_02_T1',
-        s2_scene_id     = 'S2B_MSIL2A_20200714T172859_R055_T13SER_20201027T082456'
-        ),
-    ]
+all_scene_combos = pd.read_csv('./data/scene_combinations.csv')
 
-
+# make  a small test set of scene combos
+all_scene_combos = all_scene_combos[(~all_scene_combos.s2_scene_id.isna()) & (~all_scene_combos.l8_scene_id.isna())]
+all_scene_combos = all_scene_combos.sample(10, random_state=3).reset_index()
 
 #scene_combo = all_scene_combos[0]
-for scene_combo in all_scene_combos:
+for scene_i, scene_combo in all_scene_combos.iterrows():
+    if not scene_combo.scenes_available:
+        continue
+
+    print('processing scene {}/{} - {}'.format(scene_i, len(all_scene_combos), scene_combo.ltar_roi_id))
+    # domain IDs are like 'wgew-1'
+    ltar_domain = scene_combo.ltar_roi_id.split('-')[0]
+
     # get the planet scene ROI to crop with
-    planet_scene_info = planet_client.get_item(scene_combo['planet_scene_type'], scene_combo['planet_scene_id']).get()
+    planet_scene_info = planet_client.get_item(planet_scene_type, scene_combo.planet_scene_id).get()
     planet_scene_shape = shape(planet_scene_info['geometry'])
     
     #------------------------------------------
     # L8 NDVI
     
-    l8_scene_info = [i.to_dict() for i in ms_catalog.search(ids = [scene_combo['l8_scene_id']]).get_items()][0]
+    l8_scene_info = [i.to_dict() for i in ms_catalog.search(ids = [scene_combo.l8_scene_id]).get_items()][0]
     
     l8_bands = dict(SR_B4=None,SR_B5=None,QA_PIXEL=None)
     
@@ -114,7 +108,7 @@ for scene_combo in all_scene_combos:
     l8_ndvi_profile = l8_bands['SR_B4']['profile']
     l8_ndvi_profile['dtype'] = rasterio.float32
     
-    raster_filename = scene_combo['ltar_domain'] + '_L8_NDVI.tif'
+    raster_filename =  '{}_{}_l8_ndvi.tif'.format(scene_combo.ltar_roi_id, scene_combo.time_period)
     write_raster(filepath = path.join(image_folder, raster_filename),
                  raster_profile = l8_ndvi_profile,
                  raster_data = l8_ndvi,
@@ -123,7 +117,7 @@ for scene_combo in all_scene_combos:
     
     #------------------------------------------
     # Sentinal 2 NDVI
-    s2_scene_info = [i.to_dict() for i in ms_catalog.search(ids = [scene_combo['s2_scene_id']]).get_items()][0]
+    s2_scene_info = [i.to_dict() for i in ms_catalog.search(ids = [scene_combo.s2_scene_id]).get_items()][0]
     
     s2_bands = dict(B08=None,B04=None,SCL=None)
     
@@ -148,8 +142,8 @@ for scene_combo in all_scene_combos:
     # s2 SCL is 20m resolution, so resample using nearest neighber to 10m 
     # to match ndvi
     s2_mask_resampled, s2_mask_resampled_profile = rasterio.warp.reproject(
-        source = s2_mask_placeholder,
-        destination = s2_bands['B08']['data'],
+        source = s2_mask,
+        destination = s2_mask_placeholder,
         src_transform = s2_bands['SCL']['profile']['transform'],
         dst_transform = s2_bands['B08']['profile']['transform'],
         src_crs = s2_bands['SCL']['profile']['crs'],
@@ -165,42 +159,10 @@ for scene_combo in all_scene_combos:
     
     s2_ndvi_profile = s2_bands['B08']['profile']
     s2_ndvi_profile['dtype'] = rasterio.float32
-    raster_filename = scene_combo['ltar_domain'] + '_S2_NDVI.tif'
+    raster_filename = '{}_{}_s2_ndvi.tif'.format(scene_combo.ltar_roi_id, scene_combo.time_period)
     write_raster(filepath = path.join(image_folder, raster_filename),
                  raster_profile = s2_ndvi_profile,
                  raster_data = s2_ndvi,
                  bands = 'single'
                  )
-    
-
-
-#------------------------------------------
-# Planet NDVI
-
-products_order_info = [
-{'item_ids': [scene_combo['planet_scene_id']],
- 'item_type': 'PSScene4Band',
- 'product_bundle' : 'analytic_sr'
- }
-]
-#---------------------------
-# Order tools
-bandmath = {"bandmath": {
-    "pixel_type": "32R",
-    "b1": "(b4 - b3) / (b4 + b3)"
-  }
-}
-
-order_request = {
-    'name' : 'jornada test nov22',
-    'products' : products_order_info,
-    'tools' : [bandmath]
-    }
-
-order_url = planet_tools.place_order(order_request, planet_auth)
-planet_tools.wait_on_order(order_url, planet_auth)
-
-downloaded_files = planet_tools.download_order(order_url, planet_auth, dest_dir='./data/imagery/')
-    
-    
     

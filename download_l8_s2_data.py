@@ -94,7 +94,7 @@ for scene_i, scene_combo in all_scene_combos.iterrows():
     qa_unpacked = unpackqa.unpack_to_array(
         l8_bands['QA_PIXEL']['data'], 
         'LANDSAT_8_C2_L2_QAPixel',
-        ['Dilated_Cloud','Cirrus','Cloud','Cloud_Shadow','Snow','Water'])
+        ['Fill','Dilated_Cloud','Cirrus','Cloud','Cloud_Shadow','Snow','Water'])
     # True where a pixel has any of the above flags
     qa_unpacked = qa_unpacked.sum(axis=-1) > 0
     l8_bands['masked_pixels'] = qa_unpacked

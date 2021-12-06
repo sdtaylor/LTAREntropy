@@ -31,6 +31,12 @@ planet_temp_folder = './data/imagery/planet_download/'
 
 planet_scene_type = 'PSScene4Band'
 
+index_bands = dict(
+    ndvi = 1,
+    evi2 = 2
+    )
+
+
 #------------------------
 # Planet API
 from planet_api_setup import planet_client, planet_auth
@@ -42,7 +48,7 @@ all_scene_combos = pd.read_csv('./data/scene_combinations.csv')
 
 # make  a small test set of scene combos
 all_scene_combos = all_scene_combos[(~all_scene_combos.s2_scene_id.isna()) & (~all_scene_combos.l8_scene_id.isna())]
-all_scene_combos = all_scene_combos.sample(10, random_state=3).reset_index()
+#all_scene_combos = all_scene_combos.sample(10, random_state=3).reset_index()
 
     
 #-------------------------------------
@@ -104,25 +110,50 @@ def process_planet_imagery(source_dir, dest_dir):
             continue
         
         scene_planet_files = [f for f in all_downloaded_files if scene_combo.planet_scene_id in f]
+        
+        if len(scene_planet_files) == 0:
+            continue
+        
         primary_file = [f for f in scene_planet_files if 'bandmath.tif' in f]
-        assert len(primary_file) == 1
+        assert len(primary_file) == 1, 'issue with scene'
         primary_file = primary_file[0]
         udm2_file = [f for f in scene_planet_files if 'udm2.tif' in f]
         assert len(udm2_file) == 1
         udm2_file = udm2_file[0]
     
+        for index, index_band in index_bands.items():
+            pass
+            with rasterio.open(primary_file) as primary_src, rasterio.open(udm2_file) as udm2_src:
+                planet_index = primary_src.read(index_band) # band 1 is ndvi in the bandmath done above
+                planet_index_profile = primary_src.profile
+                planet_clear = udm2_src.read(1) # band 1 of udm2 is the  "clear map" where 1=clear and 0=not clear, https://developers.planet.com/docs/data/udm-2/
         
-        with rasterio.open(primary_file) as primary_src, rasterio.open(udm2_file) as udm2_src:
-            planet_ndvi = primary_src.read(1) # band 1 is ndvi in the bandmath done above
-            planet_ndvi_profile = primary_src.profile
-            planet_clear = udm2_src.read(1) # band 1 of udm2 is the  "clear map" where 1=clear and 0=not clear, https://developers.planet.com/docs/data/udm-2/
-    
-        planet_ndvi[planet_clear==0] = np.nan
-    
-        raster_filename = '{}_{}_planet_ndvi.tif'.format(scene_combo.ltar_roi_id, scene_combo.time_period)
-        planet_ndvi_profile.update(count=1)
-        write_raster(filepath = path.join(image_folder, raster_filename),
-                 raster_profile = planet_ndvi_profile,
-                 raster_data = np.expand_dims(planet_ndvi,0),
-                 bands = 'single'
-                 )
+            planet_index_profile.update(count=1)
+             
+            planet_index[planet_clear==0] = np.nan
+        
+            raster_filename =  '{roi_id}_{time_period}_planet_{index}.tif'.format(
+                                    roi_id = scene_combo.ltar_roi_id, 
+                                    time_period = scene_combo.time_period,
+                                    index = index)
+            
+           
+            
+            write_raster(filepath = path.join(image_folder, raster_filename),
+                     raster_profile = planet_index_profile,
+                     raster_data = np.expand_dims(planet_index,0),
+                     bands = 'single'
+                     )
+
+
+process_planet_imagery(source_dir = planet_temp_folder, dest_dir = image_folder)
+
+
+
+
+
+
+
+
+
+

@@ -34,6 +34,12 @@ image_folder = './data/imagery/'
 
 planet_scene_type = 'PSScene4Band'
 
+index_funcs = dict(
+    ndvi = lambda r, n: (n-r)/(n+r),
+    evi2 = lambda r, n: 2.5 * ((n-r)/(1 + n + (2.4*r)))
+    )
+
+
 #------------------------
 # Planet API
 from planet_api_setup import planet_client, planet_auth
@@ -102,19 +108,26 @@ for scene_i, scene_combo in all_scene_combos.iterrows():
     # NDVI and mark masked pixels as na
     b4 = (l8_bands['SR_B4']['data'] * 0.0000275) + -0.2
     b5 = (l8_bands['SR_B5']['data'] * 0.0000275) + -0.2
-    l8_ndvi = (b5-b4)/(b5+b4)
-    l8_ndvi[l8_bands['masked_pixels']] = np.nan
     
-    l8_ndvi_profile = l8_bands['SR_B4']['profile']
-    l8_ndvi_profile['dtype'] = rasterio.float32
+    output_profile = l8_bands['SR_B4']['profile']
+    output_profile['dtype'] = rasterio.float32
     
-    raster_filename =  '{}_{}_l8_ndvi.tif'.format(scene_combo.ltar_roi_id, scene_combo.time_period)
-    write_raster(filepath = path.join(image_folder, raster_filename),
-                 raster_profile = l8_ndvi_profile,
-                 raster_data = l8_ndvi,
-                 bands = 'single'
-                 )
+    for index, index_function in index_funcs.items():
     
+        l8_index = index_function(r = b4, n = b5)
+        l8_index[l8_bands['masked_pixels']] = np.nan
+        
+        raster_filename =  '{roi_id}_{time_period}_l8_{index}.tif'.format(
+            roi_id = scene_combo.ltar_roi_id, 
+            time_period = scene_combo.time_period,
+            index = index)
+        write_raster(filepath = path.join(image_folder, raster_filename),
+                     raster_profile = output_profile,
+                     raster_data = l8_index,
+                     bands = 'single'
+                     )
+
+    b4 = b5 = []
     #------------------------------------------
     # Sentinal 2 NDVI
     s2_scene_info = [i.to_dict() for i in ms_catalog.search(ids = [scene_combo.s2_scene_id]).get_items()][0]
@@ -151,18 +164,24 @@ for scene_i, scene_combo in all_scene_combos.iterrows():
         )
     
     
-    # NDVI and marked 
+    # 
     b8 = s2_bands['B08']['data'] * 0.0001
     b4 = s2_bands['B04']['data'] * 0.0001
-    s2_ndvi = (b8 - b4)/(b8 + b4)
-    s2_ndvi[s2_mask_resampled == 1] = np.nan
     
-    s2_ndvi_profile = s2_bands['B08']['profile']
-    s2_ndvi_profile['dtype'] = rasterio.float32
-    raster_filename = '{}_{}_s2_ndvi.tif'.format(scene_combo.ltar_roi_id, scene_combo.time_period)
-    write_raster(filepath = path.join(image_folder, raster_filename),
-                 raster_profile = s2_ndvi_profile,
-                 raster_data = s2_ndvi,
-                 bands = 'single'
-                 )
+    output_profile = s2_bands['B08']['profile']
+    output_profile['dtype'] = rasterio.float32
     
+    for index, index_function in index_funcs.items():
+    
+        s2_index = index_function(r = b4, n = b8)
+        s2_index[s2_mask_resampled == 1] = np.nan
+        
+        raster_filename =  '{roi_id}_{time_period}_s2_{index}.tif'.format(
+            roi_id = scene_combo.ltar_roi_id, 
+            time_period = scene_combo.time_period,
+            index = index)
+        write_raster(filepath = path.join(image_folder, raster_filename),
+                     raster_profile = output_profile,
+                     raster_data = s2_index,
+                     bands = 'single'
+                     )
